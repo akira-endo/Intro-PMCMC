@@ -1,0 +1,239 @@
+---
+title: "Dureau model"
+#documentclass: book
+author: Edwin van Leeuwen
+bibliography: assets/references.bib
+---
+
+```{r setup, include=F}
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(pander)
+library(lubridate)
+library(latex2exp)
+
+knitr::opts_chunk$set(cache = T, echo = F, message = F, warning = F,
+    fig.path = "assets/figures/",
+    dev = c('pdf', 'png')
+)
+
+theme_set(theme_bw())
+
+# Appropiate colours for colourblind
+cbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999")
+
+scale_colour_discrete <- function(...)
+  scale_colour_manual(..., values = cbPalette)
+scale_fill_discrete <- function(...)
+  scale_fill_manual(..., values = cbPalette)
+```
+
+# Introduction
+
+This example is a re-implementation of the model first presented by @dureau_capturing_2013. The pandemic influenza epidemic in 2009 in the UK exhibited two waves, which is highly unusual and the study explored whether this could be explained by changes in the transmission rate over time, due to school holidays. They explored a number of models. In this example we will explore their simplest model. The data used was a weekly time-series of the GP consultations in the UK during the 2009 pandemic. 
+
+# Model
+
+The model is borrowed from the original study [@dureau_capturing_2013]. The modelled states are: susceptibles (\(S\)), exposed (\(E\)), infected (\(I\)) and recovered (\(R\)).
+
+\begin{align}\begin{split}
+\frac{\mathrm{d}S}{\mathrm{d}t} & = - \beta S(t) \frac{I(t)}{N}\\
+\frac{\mathrm{d}E}{\mathrm{d}t} & = \beta S(t) \frac{I(t)}{N} - k E(t)\\
+\frac{\mathrm{d}I}{\mathrm{d}t} & = k E(t) - \gamma I(t)\\
+\frac{\mathrm{d}R}{\mathrm{d}t} & = \gamma I(t)\\
+\frac{\mathrm{d}Z}{\mathrm{d}t} & = k E(t) - Z \delta(t \bmod 7)\\
+\frac{\mathrm{d}x}{\mathrm{d}t} & = \sigma \mathrm{dW}\\
+\beta & = e^{x(t)}
+\end{split}\end{align}
+with \(Z\) the cumulative number of new infections per seven days and \(x\) the log transformed transmissibility.
+\(\delta(t \bmod 7)\) is the Dirac delta function, which causes \(Z\) to reset to zero when \(t \bmod 7 = 0\), i.e., every seven days.  The latent and infectious periods correspond to \(\frac1k\) and \(\frac1{\gamma}\), respectively. The amplitude of the stochasticity in the transmission rate is controlled by the parameter \(\sigma\).
+
+## Likelihood
+
+The likelihood of the data was assumed to be log-normally distributed in
+the original manuscript. Not everyone infected ends up visiting
+a GP, either due to asymptomatic infections or the patients' likelihood
+to consult a GP. Therefore the authors
+assumed that the true incidence was 10 times higher than the number of GP
+visits. This correction was further supported by serological survey (see
+the original study for further details [@dureau_capturing_2013]).
+
+\[\mathcal{L}(Z|y_i, \tau) = \mathcal{N}(\log(y_i), \log (Z/10), \tau)\]
+
+## Priors
+
+Most parameters in the model have a wide uniform prior, except for the latent period, which was assumed to be normal distributed with mean 1.59 and standard deviation 0.02, the infectious period, which was normal distributed with mean 1.08 and standard deviation 0.075 and the initial recovered (immune) population, which was normal distributed with a mean of 0.15 and standard deviation of 0.15 (truncated between 0 and 1; @durea_capturing_2013). 
+
+```{r load_data, echo = T}
+library(rbi)
+library(rbi.helpers)
+# Load the data
+v <- read.csv("assets/andre_estimates_21_02.txt", sep  = "\t") %>%
+  rowSums()
+y <- data.frame(value = v) %>%
+  mutate(time = seq(7, by = 7, length.out = n())) %>%
+  dplyr::select(time, value)
+ncores <- 8
+minParticles <- max(ncores, 16)
+```
+
+```{r model, echo = T}
+model_str <- "
+model dureau {
+  obs y
+
+  state S
+  state E
+  state I
+  state R
+  state x
+
+  state Z
+
+  input N
+  param k
+  param gamma
+  param sigma // Noise driver
+  param E0
+  param I0
+  param R0
+  param x0
+  param tau
+
+  sub parameter {
+    k ~ truncated_gaussian(1.59, 0.02, lower = 0) // k is the period here, not the rate, i.e. 1/k is the rate
+    gamma ~ truncated_gaussian(1.08, 0.075, lower = 0) // gamma is the period, not the rate
+    sigma ~ uniform(0,1)
+    x0 ~ uniform(-5,2)
+    I0 ~ uniform(-16, -9)
+    E0 ~ uniform(-16, -9)
+    R0 ~ truncated_gaussian(0.15, 0.15, lower = 0, upper = 1)
+    tau ~ uniform(0, 1)
+  }
+
+  sub initial {
+    S <- N
+    R <- R0*S
+    S <- S - R
+
+    E <- exp(E0 + log(S))
+    S <- S - E
+    I <- exp(I0 + log(S))
+    S <- S - I
+    x <- x0
+    Z <- 0
+  }
+
+  sub transition(delta = 1) {
+    Z <- ((t_now) % 7 == 0 ? 0 : Z)
+    noise e
+    e ~ wiener()
+    ode(alg = 'RK4(3)', h = 1.0, atoler = 1.0e-3, rtoler = 1.0e-8) {
+      dx/dt = sigma*e
+      dS/dt = -exp(x)*S*I/N
+      dE/dt = exp(x)*S*I/N - E/k
+      dI/dt = E/k-I/gamma
+      dR/dt = I/gamma
+      dZ/dt = E/k
+    }
+  }
+
+  sub observation {
+    y ~ log_normal(log(max(Z/10.0, 0)), tau)
+  }
+
+  sub proposal_parameter {
+    k ~ gaussian(k, 0.005)
+    sigma ~ gaussian(sigma, 0.01)
+    gamma ~ gaussian(gamma, 0.01)
+    x0 ~ gaussian(x0, 0.05)
+    E0 ~ gaussian(E0, 0.05)
+    I0 ~ gaussian(I0, 0.05)
+    R0 ~ gaussian(R0, 0.05)
+    tau ~ gaussian(tau, 0.05)
+  }
+}"
+```
+
+# Results
+
+Run the inference (note this can take some time):
+
+```{r, echo = T}
+model <- bi_model(lines = stringi::stri_split_lines(model_str)[[1]])
+bi_model <- libbi(model)
+input_lst <- list(N = 52196381)
+end_time <- max(y$time)
+obs_lst <- list(y = y %>% dplyr::filter(time <= end_time))
+
+bi <- sample(bi_model, end_time = end_time, input = input_lst, obs = obs_lst, nsamples = 100, nparticles = minParticles, nthreads = ncores, verbose = T, proposal = 'prior') %>% 
+  adapt_particles(min = minParticles, max = minParticles*200) %>%
+  adapt_proposal(min = 0.05, max = 0.4) %>%
+  sample(nsamples = 1000, thin = 1)
+
+bi_lst <- bi_read(bi %>% sample_obs)
+```
+
+```{r figDatafit, dependson = c("load_results"), fig.cap="Model inference results. Top panel shows the GP consultation results, with the points showing the actual data points. The ribbons represent the 95%% and 50%% confidence interval in incidence and the black line shows the median. The middle panel shows the transmissibiltiy over time and the bottom panel the change in transmissibility relative to the starting transmissibility.", echo = F, fig.height = 8}
+fitY <- bi_lst$y %>% 
+  group_by(time) %>%
+  mutate(
+    q025 = quantile(value, 0.025),
+    q25 = quantile(value, 0.25),
+    q50 = quantile(value, 0.5),
+    q75 = quantile(value, 0.75),
+    q975 = quantile(value, 0.975)
+  ) %>% ungroup() %>%
+  left_join(y %>% rename(Y = value))
+
+g1 <- ggplot(data = fitY) +
+  geom_ribbon(aes(x = time, ymin = q25, ymax = q75), alpha = 0.3) +
+  geom_ribbon(aes(x = time, ymin = q025, ymax = q975), alpha = 0.3) +
+  geom_line(aes(x = time, y = q50)) +
+  geom_point(aes(x = time, y = Y), colour = "Red") +
+  ylab("GP consultations") +
+  xlab("Time")
+
+plot_df <- bi_lst$x %>% mutate(value = exp(value)) %>%
+  group_by(time) %>%
+  mutate(
+    q025 = quantile(value, 0.025),
+    q25 = quantile(value, 0.25),
+    q50 = quantile(value, 0.5),
+    q75 = quantile(value, 0.75),
+    q975 = quantile(value, 0.975)
+  ) %>% ungroup()
+
+g2 <- ggplot(data = plot_df) +
+  geom_ribbon(aes(x = time, ymin = q25, ymax = q75), alpha = 0.3) +
+  geom_ribbon(aes(x = time, ymin = q025, ymax = q975), alpha = 0.3) +
+  geom_line(aes(x = time, y = q50)) +
+  ylab(TeX("Transmissibility ($\\beta(t)$)")) +
+  xlab("Time")
+
+plot_df <- bi_lst$x %>% mutate(value = exp(value)) %>% 
+  group_by(np) %>% mutate(value = value - value[1]) %>%
+  group_by(time) %>%
+  mutate(
+    q025 = quantile(value, 0.025),
+    q25 = quantile(value, 0.25),
+    q50 = quantile(value, 0.5),
+    q75 = quantile(value, 0.75),
+    q975 = quantile(value, 0.975)
+  ) %>% ungroup()
+
+g3 <- ggplot(data = plot_df) +
+  geom_ribbon(aes(x = time, ymin = q25, ymax = q75), alpha = 0.3) +
+  geom_ribbon(aes(x = time, ymin = q025, ymax = q975), alpha = 0.3) +
+  geom_line(aes(x = time, y = q50)) +
+  ylab(TeX("Relative trans. ($\\beta(t)-\\beta(0)$)")) +
+  xlab("Time")
+
+
+ggarrange(g1, g2, g3, ncol = 1, nrow = 3, align = "v")
+```
+
+Figure \@ref(fig:figDatafit) shows the results of the data fitting. The top panel shows the incidence data (red dots), with the two distinct epidemiological waves and the model predict. As shown the model is able to reproduce both waves.  The middle panel shows transmissibility over time, with an apparent dip between day 50 and 100. This dip can be confirmed by comparing the transmissibility to the transmissibility at time 0 (bottom panel), which shows that between day 50 and 100 the transmissibility is below the starting transmissibility in all cases. The dip in transmissibility coincides with the time period that the first epidemiological wave started to slow down.
+
+# References
