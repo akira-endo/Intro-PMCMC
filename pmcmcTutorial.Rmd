@@ -1,0 +1,234 @@
+---
+title: "A PMCMC Tutorial for infectious disease modellers"
+author: "Marc Baguelin"
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+```{r}
+#Files with the code of the functions used in the tutorial
+source(file = "R/Volatility_SIS.R")
+source(file = "R/ReedFrost.R")
+```
+
+#Introduction
+This is a tutorial on PMCMC with a special attention to transmission disease modellers.
+
+This tutorial will guide you through the basic concepts necessary to understand particle Markov chain Monte Carlo (PMCMC) and will let you build an algorithm to perform pMcMC on the Reed-Frost model, one of the simplest of the stochastic epidemic models. 
+
+This tutorial has been built by taking material from different references
+Andrieu et al.
+Chopin & Papaspiliopoulos
+Robert & Casela
+
+#Background concepts
+
+pMcMC is built out of several key concepts from statistics. One of the problems for mathematical modellers to get into Particle MCMC, is in my opinion, that we might not be familiar with some of these (elementary) statistical concepts. It is important to understand well each of these elementary concepts.
+
+Another difficulty arises as many of these key concepts have connectiongs in different disciplines and sometimes have been developed concurrently under different names.
+
+```{r, echo=F}
+DiagrammeR::grViz("
+digraph rmarkdown{
+'Monte Carlo' -> 'Importance Sampling' -> 'Sequential IS' -> 'SMC';
+'Monte Carlo' -> 'MCMC';
+{'MCMC' 'SMC'} -> 'Particle MCMC'
+}", height=300)
+```
+
+##Monte Carlo approximation
+
+Monte Carlo methods have originated in the 1940's during the effort by allied physicist to develop a nuclear bomb in Los Alamos. One of most common problem in statistical inference is to compute integrals. Monte Carlo is a numerical method which allows to calculate easily (or at least relatively easily compared with other methods) integrals. The method use the definition of expectation as an integral over a probability measure.
+$$\mathbb{E}_{f} [h(X) ] = \int_{\mathcal{X}} h(x)f(x)dx$$
+
+$$\frac{1}{N} \sum \limits^{N}_{n=1}h(X^{n}), \space X^{n} \sim f,$$
+
+##Bayesian inference
+
+Very often, we want to relate a model of a phenomenon with some observations of this phenomenon. Most of the time the model is defined as equations describing the mechanisms of the phenomenon (mechanistic model). We thus usually have and idea on . The fundamental idea behind Bayesian inference is to use Bayes' theorem to derive the probability of  
+
+##Importance sampling
+
+The idea behind importance sampling is simple. Monte Carlo approximation relies on the ability to draw from a certain distribution (q). In many cases, this might be complicated or inefficient. The idea is to sample from a simpler distribution and then calculate "weights" associated with these samples in order be able to derive a Monte Carlo approximation with these samples.
+
+###Basic algorithm
+
+Importance sampling is based on the simple identity
+$$\mathbb{E}_{f} [h(X) ] = \int_{\mathcal{X}} h(x)\frac{f(x)}{g(x)}g(x)dx=\mathbb{E}_{g}\left [\frac{h(X)f(X)}{g(X)} \right ].$$
+And thus $\mathbb{E}_{f} [h(X) ]$ can be estimated as
+$$\frac{1}{n} \sum\limits_{j=1}^{n}\frac{f(X_{j})}{g(X_{j})}h(X_j)\rightarrow\mathbb{E}_{f} [h(X) ]$$
+with $X_{j}$ drawn from $g$. $g$ can be chosen arbitrary as soon as supp($g$) $\supset$ supp($h \times f$) with supp$(f)=\{x \in X | f(x) \neq 0 \}$ for $f: X \rightarrow \mathbb{R}$.
+
+###Example. Estimating the tail of a normal distribution
+
+Let's assume that we are interested in computing $P(Z>4.5)$ for $Z \sim \mathcal{N}(0,1)$
+
+```{r}
+pnorm(-4.5)
+```
+
+So to compute $P(Z>4.5)$ using a naive Monte Carlo estimate is very unefficient as a hit is produced on average every 3 millions or so draws. To get a stable estimate we would need a huge number of simulations.
+Using importance sampling, we can chose another distribution, valued on $[ 4.5 , +\infty[$ to calculate $P(Z>4.5)$. A natural choice is
+$$g(y)=\frac{e^{-y}}{\int_{4.5}^{\infty}e^{-x}dx }=e^{-(y-4.5)}$$
+which leads to the following importance sampling estimator
+$$\frac{1}{n} \sum\limits_{i=1}^{n} \frac{f(Y^i)}{g(Y^i)}=\frac{1}{n}\sum\limits_{i=1}^{n} \frac{e^{-Y^2/2+Y_i-4.5}}{\sqrt{2 \pi}}$$
+
+```{r}
+#Number of Monte Carlo samples
+Nsim=10^3
+
+#Draw samples from the truncated exponential
+y=rexp(Nsim)+4.5
+
+#Calculation of the importance weights
+weit=dnorm(y)/dexp(y-4.5)
+
+#Plot the the Monte-Carlo estimator and in red the true value
+plot(cumsum(weit)/1:Nsim,type="l")
+abline(a=pnorm(-4.5),b=0,col="red")
+```
+
+###Importance sampling resampling
+
+##State space models
+
+###Example 1. Volatility model
+
+$$\begin{array}{rcl}
+X_{n} & = & \alpha X_{n-1} + \sigma V_{n}\\
+Y_{n} & = & \beta \exp \left ( \frac{X_{n}}{2}\right) W_{n}  
+\end{array}$$
+
+```{r}
+simu<-SV_simulate(N=500,alpha=0.91,sigma=1,beta=0.5) #changed .5 for orginal 0.91
+
+plot(simu$X,type="l",col="blue",ylim=c(-10,10),xlab="Time")
+points(simu$Y,pch="*",col="red")
+
+```
+
+###Example 2. Reed-Frost model with Negative Binomial observation
+
+The Reed-Frost model is a dicrete-time stochastic model, with each time step representing a new generation of infectious agents. During the period of time between two timesteps, each of the susceptible individuals has a probability $p$ of getting infected by any infectious individual. The probability of escaping infection from all the infectious individuals is $(1-p)^{I_{n-1}}$ and thus the number of infectious individuals at the next time step (i.e. the ones who did not escape infection) can be drawn from a binomial distribution with probability $1-(1-p)^{I_{n-1}}$. On top of this we assume that we can only detect a fraction of the cases. 
+
+$$\begin{array}{rcl}
+I_{n} & \sim & Bin \left (S_{n-1}, 1-(1-p)^{I_{n-1}} \right )\\
+S_{n} & = & S_{n-1} - I_{n} 
+\end{array}$$
+
+The Reed-Frost model can be made into a state space model by using $(S_{n},I_{n})$ as the state space and writing an observation function. For example if we assume, that on average only a proportion $p_{obs}$ of the infected individuals are observed and that the observed cases are distributed following a neg-binomial of size $s$.
+
+$$\begin{array}{rcl}
+X_{n}&=&(S_{n},I_{n})\\
+Y_{n} &\sim& NegBin(\mu=p_{obs}*I_{n}, size=s) 
+\end{array}$$
+
+```{r}
+#Simulate a Reed-Frost model with negative binomial observation
+simuRF<-RF_with_obs()
+
+#Plot of the observation
+plot(simuRF$Y, pch=18, col="red", xlab="Number of generations", ylab="Number of cases")
+
+#Blue line representing the actual underlying epidemics scaled by the proportion detected
+lines(simuRF$X[,2]*.05,col="#0000ff77", lwd=4)
+```
+
+##Filtering and inference
+
+When confronting a SSM with data, two common problems pop up. We might want to know what is the actual hidden trajectory of the system, this is particularly important in situations where you want to do some sort of control/reactive intervention. This type of question is called "Filtering" i.e. recovering the actual state of the system through the noise and distortion created by the observation process. The filtering problem assumes that the parameter $\theta$ of the models are fully known, all the uncertainty in the status coming from the stochasticity of the processes and the noise
+
+$$p_{\theta}(X_{1:T}|Y_{1:T})$$
+
+Another problem is to estimate which likely parameter distribution given the observation. In the case of SSM, it means infer jointly
+
+$$p(\theta,x_{1:T}|Y_{1:T}) \propto p_{\theta}(X_{1:T},Y_{1:T})p(\theta)$$
+
+#Sequential Monte Carlo
+
+Sequential Monte Carlo (SMC) is a methodology which trying to exploit the sequential time structure of the model to calculate efficiently some quantities. In particular it is particularly useful to infer the hidden states of the model (filtering) but also to calculate the overall (i.e. marginalising over the possible hidden states) probability of the model to generate the data (the marginal likelihood). This is this property which allows to integrate SMC with other algorithms from computational statistics (such as MCMC) to perform jointly inference of hidden states and model parameters.
+
+##Sequential importance sampling
+
+
+
+##Sequential sampling resampling
+
+###Example 1 Volatility
+
+```{r}
+#Plot the hidden state of the trajectory
+plot(simu$X,type="l",col="blue")
+
+#Run the particle filter
+filterParticles<-SV_SIR(simu$Y)
+
+#Calculate the mean path at each time point
+mu_Xp<-computeMeanPath(filterParticles)
+
+#Plot the filtered hidden states
+points(mu_Xp,pch=19,col="#00aa0066")
+```
+
+###Example 2 Reed-Frost epidemic model
+
+
+
+```{r}
+#SMC on the observed epidemic
+filter_particlesRF <- RF_SIR(simuRF$Y)
+summary_PF_RF <- computeMeanPathRF(filter_particlesRF)
+plot(NULL,xlim=c(0,50),ylim=c(0,max(summary_PF_RF$mu_Xp[,3],simuRF$Y/0.05))  ,col="white",xlab="Time",ylab="Number of cases")
+
+#95% confidence interval
+polygon(c(1:50,50:1),c(summary_PF_RF$mu_Xp[,2],summary_PF_RF$mu_Xp[50:1,3]),col="#00bb0033",border=NA)
+
+#Hidden Markov model
+lines(simuRF$X[,2],col="blue",lwd=2)
+
+#Mean of particles
+lines(summary_PF_RF$mu_Xp[,1],col="#00bb0066",lwd=2)
+
+#Observations
+points(simuRF$Y/0.05, pch=18, col="red")
+legend("topright", legend = c("Scaled observations","95% CI of particles","Mean particles","Hidden states"), bty="n", col=c("red","#00bb0033","#00bb0066","blue"), pch=c(18,15,NA,NA), pt.cex=c(1,2,1,1),lty=c(0,0,1,1), lwd=2)
+
+```
+
+We will use in this last section the Particle marginal Metropolis–Hastings sampler from Andrieu et al.
+
+```{r}
+Na<-50
+Np<-5000
+p_estimate <- seq(from=0.00014,to=0.00017,length.out = Na)
+marginal_likelihood <- rep(0,Na)
+
+for(i in 1:Na)
+{
+  filterParticles<-RF_SIR(simuRF$Y, Np=Np, p=p_estimate[i])
+  
+  marginal_likelihood[i]<-prod(colSums(filterParticles$wp)/Np)
+}
+
+plot(p_estimate, log(marginal_likelihood), xlab="probability of transmission", ylab="Marginal log-likelihood")
+abline(v=0.00015, col="red")
+```
+
+#Particle MCMC
+
+```{r}
+#Run a particle Marginal Metropolis Hastings algorithm
+inference_results<-RF_PMMH(simuRF$Y, PBar=F, p0=0.0001)
+```
+
+
+```{r}
+plot(inference_results$p, ylim=c(0,0.00020), ylab = "Probability of transmission")
+abline(h=0.00015,col="red")
+```
+
+
