@@ -167,10 +167,11 @@ input_lst <- list(N = 52196381)
 end_time <- max(y$time)
 obs_lst <- list(y = y %>% dplyr::filter(time <= end_time))
 
-bi <- sample(bi_model, end_time = end_time, input = input_lst, obs = obs_lst, nsamples = 100, nparticles = minParticles, nthreads = ncores, verbose = T, proposal = 'prior') %>% 
+bi <- sample(bi_model, end_time = end_time, input = input_lst, obs = obs_lst, nsamples = 1000, nparticles = minParticles, nthreads = ncores, proposal = 'prior') %>% 
   adapt_particles(min = minParticles, max = minParticles*200) %>%
   adapt_proposal(min = 0.05, max = 0.4) %>%
-  sample(nsamples = 1000, thin = 1)
+  sample(nsamples = 5000, thin = 5) %>% # burn in 
+  sample(nsamples = 5000, thin = 5)
 
 bi_lst <- bi_read(bi %>% sample_obs)
 ```
@@ -192,7 +193,7 @@ g1 <- ggplot(data = fitY) +
   geom_ribbon(aes(x = time, ymin = q025, ymax = q975), alpha = 0.3) +
   geom_line(aes(x = time, y = q50)) +
   geom_point(aes(x = time, y = Y), colour = "Red") +
-  ylab("GP consultations") +
+  ylab("Incidence") +
   xlab("Time")
 
 plot_df <- bi_lst$x %>% mutate(value = exp(value)) %>%
